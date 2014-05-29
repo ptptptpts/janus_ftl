@@ -50,7 +50,7 @@
 #define NUM_LBLKS			(NUM_LPAGES / PAGES_PER_BLK)
 
 #define TIMESTAMP_MAX		0xffff
-#define HIT_MAX				0x65536
+#define HIT_MAX				65536
 #define AGE_OLD				0
 
 #define COST_COPY			10

@@ -236,7 +236,7 @@ static UINT32 get_df_victim_blk (UINT32 const bank);
 
 static UINT32 calc_gc_victim_blk (UINT32 const bank);
 static UINT32 calc_avg_cost (UINT32 const bank);
-static UINT32 calc_hit_rate (UINT32 const bank);
+static void calc_hit_rate (UINT32 const bank);
 
 
 //=================================================================
@@ -772,6 +772,7 @@ static void write_page(UINT32 const lpn, UINT32 const sect_offset, UINT32 const 
 	// PMA hit rate 정리
 	calc_hit_rate (bank);
 }
+
 
 static UINT32 assign_new_write_vpn(UINT32 const bank, UINT32 const lpn)
 {
@@ -2000,12 +2001,25 @@ static UINT32 calc_gc_victim_blk (UINT32 const bank)
 
 static UINT32 calc_avg_cost (UINT32 const bank)
 {
+	UINT32 cost_gc, cost_pw, cost_df, cost_avg;
+
 	// page write에 소모되는 평균 cost를 계산
-	return 0;
+	cost_gc = COST_ERASE + (PAGES_PER_BLK * COST_COPY * get_gc_victim_cost(bank)) / PAGES_PER_BLK;
+	cost_pw = cost_gc / (PAGES_PER_BLK - get_gc_victim_cost(bank)) + COST_PROG;
+	cost_df = PAGES_PER_BLK * COST_COPY + COST_ERASE + (PAGES_PER_BLK * cost_pw * get_gc_victim_cost(bank)) 
+			/ PAGES_PER_BLK;
+	cost_avg = cost_pw + (cost_df * (get_total_hit(bank) - get_page_hit(bank))) / get_total_hit(bank);
+
+	return cost_avg;
 }
 
-static UINT32 calc_hit_rate (UINT32 const bank)
+static void calc_hit_rate (UINT32 const bank)
 {
+	if (get_total_hit(bank) == HIT_MAX)
+	{
+		set_total_hit (bank, (get_total_hit(bank) / 3) * 2);
+		set_page_hit (bank, (get_page_hit(bank) / 3) * 2);
+	}
 }
 
 //=================================================================
