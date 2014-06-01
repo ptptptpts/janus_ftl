@@ -39,6 +39,8 @@ typedef struct _misc_metadata
     UINT32 cur_gc_victim;
 
     UINT32 free_blk_cnt; // total number of free block count
+	UINT32 log_blk_cnt;
+	UINT32 log_blk_min;
     UINT32 gc_block;
     UINT32 df_block;
 
@@ -119,6 +121,14 @@ UINT32 				  g_ftl_write_buf_id;
 #define set_free_blk_cnt(bank, cnt)		(g_misc_meta[bank].free_blk_cnt = cnt)
 #define inc_free_blk_cnt(bank)			(g_misc_meta[bank].free_blk_cnt++)
 #define dec_free_blk_cnt(bank)			(g_misc_meta[bank].free_blk_cnt--)
+
+#define get_log_blk_cnt(bank)			(g_misc_meta[bank].log_blk_cnt)
+#define set_log_blk_cnt(bank, cnt)		(g_misc_meta[bank].log_blk_cnt = cnt)
+#define inc_log_blk_cnt(bank)			(g_misc_meta[bank].log_blk_cnt++)
+#define dec_log_blk_cnt(bank)			(g_misc_meta[bank].log_blk_cnt--)
+
+#define get_log_blk_min(bank)			(g_misc_meta[bank].log_blk_min)
+#define set_log_blk_min(bank, cnt)		(g_misc_meta[bank].log_blk_min = cnt)
 
 #define get_gc_block(bank)				(g_misc_meta[bank].gc_block)
 #define get_df_block(bank)				(g_misc_meta[bank].df_block)
@@ -762,12 +772,14 @@ static void write_page(UINT32 const lpn, UINT32 const sect_offset, UINT32 const 
 	inc_timer(bank);
 
     // defusion 검사
-	if ((new_cost = calc_avg_cost(bank)) > get_avg_cost(bank))
-	// while ((new_cost = calc_avg_cost(bank)) > get_avg_cost(bank))
-	{
-		defusion (bank);
+	if (get_gc_victim_cost(bank) != 128) {
+		if ((new_cost = calc_avg_cost(bank)) > get_avg_cost(bank))
+		// while ((new_cost = calc_avg_cost(bank)) > get_avg_cost(bank))
+		{
+			defusion (bank);
+		}
+		set_avg_cost (bank, new_cost);
 	}
-	set_avg_cost (bank, new_cost);
 
 	// PMA hit rate 정리
 	calc_hit_rate (bank);
@@ -866,6 +878,7 @@ static UINT32 assign_new_write_vpn(UINT32 const bank, UINT32 const lpn)
 #endif
 			set_lbm_mapstat (bank, page_to_blk(lpn >> 3), BLOCK_MAPPING);
 			set_vbm_dblk (bank, page_to_blk(new_vpn));
+			dec_log_blk_cnt(bank);
 		}
 	}
 
@@ -936,6 +949,7 @@ static void format(void)
         set_gc_victim_blk(i32, 0);
 
         set_free_blk_cnt(i32, VBLKS_PER_BANK);
+		set_log_blk_cnt(i32, 0);
     }
 
     //----------------------------------------
@@ -1105,6 +1119,8 @@ static void init_metadata_sram(void)
                 set_check_blk (bank, vblock);
             }
         }while (vblock < BLKS_PER_BANK);
+
+		set_log_blk_min(bank, get_free_blk_cnt(bank) - LBLKS_PER_BANK);
     }
 
     uart_printf ("init_metadata_sram :: end");
@@ -1334,7 +1350,8 @@ static UINT32 get_new_page (UINT32 const bank)
     {
         // 새 block 할당
         vbn = get_empty_blk(bank);
-		
+		inc_log_blk_cnt (bank);
+
 		// 정상적으로 block을 할당 받았을 경우 write page에 입력
 		if (vbn != 0)
 		{
@@ -1745,6 +1762,7 @@ static void fusion (UINT32 const bank, UINT32 const lbn)
 #endif
 	set_lbm_mapstat (bank, lbn, PAGE_MAPPING);
 	set_vbm_lblk (bank, get_lpm_vpn (bank, (lbn << (BLK_TO_PAGE + 3)) + bank) >> BLK_TO_PAGE);
+	inc_log_blk_cnt(bank);
 }
 
 static void defusion (UINT32 const bank)
@@ -1754,6 +1772,13 @@ static void defusion (UINT32 const bank)
 #ifdef __TEST_DEFUSION
 	uart_printf ("defusion :: under construction :(");
 #endif
+	
+	// log block이 남아있는지 검사
+	if (get_log_blk_cnt(bank) < get_log_blk_min(bank))
+	{
+		// log block을 더 사용할 수 있으면 defusion을 하지 않는다
+		return;
+	}
 
 	// defusion victim block 선정
 	vblk = get_df_victim_blk (bank);
@@ -1804,13 +1829,14 @@ static void defusion (UINT32 const bank)
 	// data block으로 설정
 	set_lbm_mapstat (bank, vblk, BLOCK_MAPPING);
 	set_vbm_dblk (bank, dst_bn);
+	dec_log_blk_cnt(bank);
 
 	// empty block이 있는 경우 새로 defusion용 block으로 설정
 	if (get_free_blk_cnt (bank) > 0)
 	{
 		UINT32 vbn;
 
-		vbn = get_empty_blk (bank);
+		vbn = get_check_blk (bank);
 		set_df_block (bank, vbn);
 		set_check_blk (bank, vbn);
 	}
@@ -1827,7 +1853,7 @@ static void defusion (UINT32 const bank)
 		while (get_free_blk_cnt(bank) == 0);
 
 		// empty block이 생기면 defusion용 block으로 설정
-		vbn = get_empty_blk (bank);
+		vbn = get_check_blk (bank);
 		set_df_block (bank, vbn);
 		set_check_blk (bank, vbn);	
 	}
