@@ -8,11 +8,11 @@
 #define VC_MAX              0xCDCD
 #define MISCBLK_VBN         0x1 // vblock #1 <- misc metadata
 
-#define LPMAP_PER_BANK		(LPAGE_MAP_BYTES / BYTES_PER_VBLK)
-#define LBMETA_PER_BANK		(LBLK_META_BYTES / BYTES_PER_VBLK)
-#define VPMAP_PER_BANK		(VPAGE_MAP_BYTES / BYTES_PER_VBLK)
-#define VBMETA_PER_BANK		(VBLK_META_BYTES / BYTES_PER_VBLK)
-#define EMPTYBLK_PER_BANK	(EMPTY_BLK_BYTES / BYTES_PER_VBLK)
+#define LPMAP_PER_BANK		((LPAGE_MAP_BYTES / NUM_BANKS) / BYTES_PER_VBLK + 1)
+#define LBMETA_PER_BANK		((LBLK_META_BYTES / NUM_BANKS) / BYTES_PER_VBLK + 1)
+#define VPMAP_PER_BANK		((VPAGE_MAP_BYTES / NUM_BANKS) / BYTES_PER_VBLK + 1)
+#define VBMETA_PER_BANK		((VBLK_META_BYTES / NUM_BANKS) / BYTES_PER_VBLK + 1)
+#define EMPTYBLK_PER_BANK	((EMPTY_BLK_BYTES / NUM_BANKS) / BYTES_PER_VBLK + 1)
 
 // the number of sectors of misc. metadata info.
 #define NUM_MISC_META_SECT  ((sizeof(misc_metadata) + BYTES_PER_SECTOR - 1)/ BYTES_PER_SECTOR)
@@ -272,9 +272,16 @@ static void mem_copy_mod (void * const dst, const void * const src, UINT32 const
 
 static void sanity_check(void)
 {
+	
     UINT32 dram_requirement = RD_BUF_BYTES + WR_BUF_BYTES + COPY_BUF_BYTES + FTL_BUF_BYTES
         + HIL_BUF_BYTES + TEMP_BUF_BYTES + BAD_BLK_BMP_BYTES + EMPTY_BLK_BYTES
         + LPAGE_MAP_BYTES + LBLK_META_BYTES + VPAGE_MAP_BYTES + VBLK_META_BYTES + FTL_TEST_BYTES;
+	
+	/*
+	UINT32 dram_requirement = RD_BUF_BYTES + WR_BUF_BYTES + COPY_BUF_BYTES + FTL_BUF_BYTES
+        + HIL_BUF_BYTES + TEMP_BUF_BYTES + BAD_BLK_BMP_BYTES + EMPTY_BLK_BYTES
+        + LPAGE_MAP_BYTES + LBLK_META_BYTES + VPAGE_MAP_BYTES + VBLK_META_BYTES;
+	*/
 
     if ((dram_requirement > DRAM_SIZE) || // DRAM metadata size check
         (sizeof(misc_metadata) > BYTES_PER_PAGE)) // misc metadata size check
@@ -1770,7 +1777,7 @@ static void defusion (UINT32 const bank)
 	UINT32 vblk, vpn, src_pn, dst_bn, dst_pn, dpn, vcnt;
 
 #ifdef __TEST_DEFUSION
-	uart_printf ("defusion :: under construction :(");
+	//uart_printf ("defusion :: under construction :(");
 #endif
 	
 	// log block이 남아있는지 검사
@@ -1836,7 +1843,7 @@ static void defusion (UINT32 const bank)
 	{
 		UINT32 vbn;
 
-		vbn = get_check_blk (bank);
+		vbn = get_empty_blk (bank);
 		set_df_block (bank, vbn);
 		set_check_blk (bank, vbn);
 	}
@@ -1853,7 +1860,7 @@ static void defusion (UINT32 const bank)
 		while (get_free_blk_cnt(bank) == 0);
 
 		// empty block이 생기면 defusion용 block으로 설정
-		vbn = get_check_blk (bank);
+		vbn = get_empty_blk (bank);
 		set_df_block (bank, vbn);
 		set_check_blk (bank, vbn);	
 	}
@@ -2792,7 +2799,7 @@ static void logging_misc_block (void)
         nand_block_erase(bank, get_miscblk_vbn(bank));        
     }
 
-    // srma에 있는 misc metadata를 nand로 저장
+    // sram에 있는 misc metadata를 nand로 저장
     for (bank = 0; bank < NUM_BANKS; bank++)
     {
         mem_copy_mod((void *)FTL_BUF(bank), (void *)&g_misc_meta[bank], misc_meta_bytes);
@@ -2884,7 +2891,7 @@ static void logging_lpm_block (void)
     UINT32 remain_bytes, write_bytes, sectors;
 
 #ifdef __TEST_LOGGING
-    uart_printf ("logging_data_block :: start");
+    uart_printf ("logging_lpm_block :: start %d blocks", LPMAP_PER_BANK);
 #endif
 
     remain_bytes = LPAGE_MAP_BYTES;
@@ -2952,7 +2959,7 @@ static void logging_lbm_block (void)
     UINT32 remain_bytes, write_bytes, sectors;
 
 #ifdef __TEST_LOGGING
-    uart_printf ("logging_data_block :: start");
+    uart_printf ("logging_lbm_block :: start %d blocks", LBMETA_PER_BANK);
 #endif
 
     remain_bytes = LBLK_META_BYTES;
@@ -3020,7 +3027,7 @@ static void logging_vpm_block (void)
     UINT32 remain_bytes, write_bytes, sectors;
 
 #ifdef __TEST_LOGGING
-    uart_printf ("logging_data_block :: start");
+    uart_printf ("logging_data_block :: start %d blocks", VPMAP_PER_BANK);
 #endif
 
     remain_bytes = VPAGE_MAP_BYTES;
@@ -3088,7 +3095,7 @@ static void logging_vbm_block (void)
     UINT32 remain_bytes, write_bytes, sectors;
 
 #ifdef __TEST_LOGGING
-    uart_printf ("logging_data_block :: start");
+    uart_printf ("logging_vbm_block :: start %d blocks", VBMETA_PER_BANK);
 #endif
 
     remain_bytes = VBLK_META_BYTES;

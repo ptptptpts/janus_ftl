@@ -28,11 +28,11 @@
 //#define __TEST_WRT
 //#define __TEST_RD
 //#define __TEST_LB
-//#define __TEST_LOGGING
-//#define __TEST_PWRECV
-#define __TEST_FUSION
-#define __TEST_DEFUSION
-#define __TEST_GC
+#define __TEST_LOGGING
+#define __TEST_PWRECV
+//#define __TEST_FUSION
+//#define __TEST_DEFUSION
+//#define __TEST_GC
 
 /////////////////
 // DRAM buffers
@@ -53,9 +53,9 @@
 #define HIT_MAX				65536
 #define AGE_OLD				0
 
-#define COST_COPY			10
+#define COST_COPY			4
 #define COST_PROG			3
-#define COST_ERASE			1
+#define COST_ERASE			30
 
 #define LPAGES_PER_BANK		(NUM_LPAGES / NUM_BANKS)
 #define VPAGES_PER_BANK		(NUM_VPAGES / NUM_BANKS)
@@ -69,9 +69,13 @@
 #define PAGE_MASK			0x0003ffff
 //================================================================================
 
-// 수정필요
+
 #define DRAM_BYTES_OTHER	((NUM_COPY_BUFFERS + NUM_FTL_BUFFERS + NUM_HIL_BUFFERS + NUM_TEMP_BUFFERS) * BYTES_PER_PAGE \
 + BAD_BLK_BMP_BYTES + LPAGE_MAP_BYTES + LBLK_META_BYTES + VPAGE_MAP_BYTES + VBLK_META_BYTES + EMPTY_BLK_BYTES + FTL_TEST_BYTES)
+/*
+#define DRAM_BYTES_OTHER	((NUM_COPY_BUFFERS + NUM_FTL_BUFFERS + NUM_HIL_BUFFERS + NUM_TEMP_BUFFERS) * BYTES_PER_PAGE \
++ BAD_BLK_BMP_BYTES + LPAGE_MAP_BYTES + LBLK_META_BYTES + VPAGE_MAP_BYTES + VBLK_META_BYTES + EMPTY_BLK_BYTES)
+*/
 
 #define WR_BUF_PTR(BUF_ID)	(WR_BUF_ADDR + ((UINT32)(BUF_ID)) * BYTES_PER_PAGE)
 #define WR_BUF_ID(BUF_PTR)	((((UINT32)BUF_PTR) - WR_BUF_ADDR) / BYTES_PER_PAGE)
@@ -110,9 +114,9 @@
 // logical page number를 virtual page number로 연결하는 table
 //
 // | .... .... | .... .... | .... .... | .... .... |
-// 0   option  8      12       page number         31
+// 0   option  8      13       page number         31
 // option					
-// virtual page number		12~31 : logical page에 연결된 physical page number
+// virtual page number		13~31 : logical page에 연결된 physical page number
 //							(0x00000000 - not used)
 //
 #define LPAGE_MAP_ADDR		(BAD_BLK_BMP_ADDR + BAD_BLK_BMP_BYTES)
@@ -140,9 +144,9 @@
 
 // virtual page와 logical page를 연결하는 mapping table
 // | .... .... | .... .... | .... .... | .... .... |
-// 0   option  8      12       page number         31
+// 0   option  8      13       page number         31
 // option				0 - valid bit (1 : valid)
-// logical page number  12-31 : virtual page에 연결된 logical page
+// logical page number  13-31 : virtual page에 연결된 logical page
 //
 #define VPAGE_MAP_ADDR		(LBLK_META_ADDR + LBLK_META_BYTES)
 #define VPAGE_MAP_SIZE		4
@@ -183,8 +187,10 @@
 #define EMPTY_BLK_BYTES		(((NUM_BANKS * EMPTY_BLK_PER_BANK) / 128 + 1) * 128)
 #define EMPTY_BLK_BND		0
 
+
 #define FTL_TEST_ADDR		(EMPTY_BLK_ADDR + EMPTY_BLK_BYTES)
 #define FTL_TEST_BYTES		(4 * 1024 * 1024)
+
 
 #define BLKS_PER_BANK		VBLKS_PER_BANK
 
