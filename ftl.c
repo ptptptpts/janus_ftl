@@ -34,6 +34,7 @@ typedef struct _misc_metadata
     //=================================================================
     UINT32 timer;
     UINT32 cur_write_page;
+	UINT32 cur_low_prior_page;
 
     UINT32 cur_gc_victim_vcnt;
     UINT32 cur_gc_victim;
@@ -41,8 +42,12 @@ typedef struct _misc_metadata
     UINT32 free_blk_cnt; // total number of free block count
 	UINT32 log_blk_cnt;
 	UINT32 log_blk_min;
-    UINT32 gc_block;
+    UINT32 gc_block[2];
+	UINT32 gc_p;
     UINT32 df_block;
+
+	UINT32 recent_emptyblk;
+	UINT32 recent_eraseblk;
 
 	UINT32 page_hit;
 	UINT32 total_hit;
@@ -109,6 +114,9 @@ UINT32 				  g_ftl_write_buf_id;
 #define get_write_page(bank)			(g_misc_meta[bank].cur_write_page)
 #define set_write_page(bank, vpn)		(g_misc_meta[bank].cur_write_page = vpn)
 
+#define get_low_prior_page(bank)		(g_misc_meta[bank].cur_low_prior_page)
+#define set_low_prior_page(bank, vpn)	(g_misc_meta[bank].cur_low_prior_page = vpn)
+
 #define get_page_offset(bank, pg_per_bank, page)		((bank * pg_per_bank) + page)
 #define get_blk_offset(bank, blk_per_bank, blk)		((bank * blk_per_bank) + blk)
 
@@ -130,10 +138,18 @@ UINT32 				  g_ftl_write_buf_id;
 #define get_log_blk_min(bank)			(g_misc_meta[bank].log_blk_min)
 #define set_log_blk_min(bank, cnt)		(g_misc_meta[bank].log_blk_min = cnt)
 
-#define get_gc_block(bank)				(g_misc_meta[bank].gc_block)
+#define get_gc_block(bank, p)			(g_misc_meta[bank].gc_block[p])
 #define get_df_block(bank)				(g_misc_meta[bank].df_block)
-#define set_gc_block(bank, vbn)			(g_misc_meta[bank].gc_block = vbn)	
+#define get_gc_p(bank)					(g_misc_meta[bank].gc_p)
+#define set_gc_block(bank, vbn, p)		(g_misc_meta[bank].gc_block[p] = vbn)	
 #define set_df_block(bank, vbn)			(g_misc_meta[bank].df_block = vbn)
+#define set_gc_p(bank, p)				(g_misc_meta[bank].gc_p = p)
+#define inv_gc_p(bank)					(g_misc_meta[bank].gc_p = (g_misc_meta[bank].gc_p + 1) & 1)
+
+#define get_recent_emptyblk(bank)		(g_misc_meta[bank].recent_emptyblk)
+#define get_recent_eraseblk(bank)		(g_misc_meta[bank].recent_eraseblk)
+#define set_recent_emptyblk(bank,vpn)	(g_misc_meta[bank].recent_emptyblk = vpn)
+#define set_recent_eraseblk(bank,vpn)	(g_misc_meta[bank].recent_eraseblk = vpn)
 
 #define get_page_hit(bank)				(g_misc_meta[bank].page_hit)
 #define get_total_hit(bank)				(g_misc_meta[bank].total_hit)
@@ -207,9 +223,11 @@ static UINT32 get_lbm_mapstat (UINT32 const bank, UINT32 const lbn);
 static void set_vpm_lpn (UINT32 const bank, UINT32 const vpn, UINT32 const lpn);
 static UINT32 set_vpm_valid (UINT32 const bank, UINT32 const vpn);
 static UINT32 set_vpm_invalid (UINT32 const bank, UINT32 const vpn);
+static void set_vpm_ow (UINT32 const bank, UINT32 const vpn);
 
 static UINT32 get_vpm_lpn (UINT32 const bank, UINT32 const vpn);
 static BOOL32 get_vpm_valid (UINT32 const bank, UINT32 const vpn);
+static BOOL32 get_vpm_ow (UINT32 const bank, UINT32 const vpn);
 
 // virtual block metadata 관리
 static void set_vbm_option (UINT32 const bank, UINT32 const vbn, UINT32 const used, UINT32 const blk_stat);
@@ -232,7 +250,6 @@ static UINT32 get_vbm_ecnt (UINT32 const bank, UINT32 const vbn);
 
 // empty block bitmap 관리
 static void set_using_blk (UINT32 const bank, UINT32 const vbn);
-static void set_check_blk (UINT32 const bank, UINT32 const vbn);
 static void set_empty_blk (UINT32 const bank, UINT32 const vbn);
 
 static UINT32 get_empty_blk (UINT32 const bank);
@@ -272,16 +289,15 @@ static void mem_copy_mod (void * const dst, const void * const src, UINT32 const
 
 static void sanity_check(void)
 {
-	
+#if OPTION_FTL_TEST
     UINT32 dram_requirement = RD_BUF_BYTES + WR_BUF_BYTES + COPY_BUF_BYTES + FTL_BUF_BYTES
         + HIL_BUF_BYTES + TEMP_BUF_BYTES + BAD_BLK_BMP_BYTES + EMPTY_BLK_BYTES
         + LPAGE_MAP_BYTES + LBLK_META_BYTES + VPAGE_MAP_BYTES + VBLK_META_BYTES + FTL_TEST_BYTES;
-	
-	/*
+#else	
 	UINT32 dram_requirement = RD_BUF_BYTES + WR_BUF_BYTES + COPY_BUF_BYTES + FTL_BUF_BYTES
         + HIL_BUF_BYTES + TEMP_BUF_BYTES + BAD_BLK_BMP_BYTES + EMPTY_BLK_BYTES
         + LPAGE_MAP_BYTES + LBLK_META_BYTES + VPAGE_MAP_BYTES + VBLK_META_BYTES;
-	*/
+#endif
 
     if ((dram_requirement > DRAM_SIZE) || // DRAM metadata size check
         (sizeof(misc_metadata) > BYTES_PER_PAGE)) // misc metadata size check
@@ -428,8 +444,8 @@ void ftl_open(void)
     // If necessary, do low-level format
     // format() should be called after loading scan lists, because format() calls is_bad_block().
     //----------------------------------------
-    if (check_format_mark() == FALSE) 
-    //if (TRUE)
+    //if (check_format_mark() == FALSE) 
+    if (TRUE)
     {
         uart_print("do format");
         format();
@@ -457,6 +473,7 @@ void ftl_open(void)
 // power off recovery
 void ftl_flush(void)
 {
+	led(0);
 #ifdef __TEST_LOGGING
     uart_printf ("ftl_flush :: logging metadata");
 #endif
@@ -469,7 +486,6 @@ void ftl_flush(void)
 #ifdef __TEST_LOGGING
     uart_printf ("ftl_flush :: logging complete");
 #endif
-    led(0);
 }
 
 // Testing FTL protocol APIs
@@ -778,18 +794,20 @@ static void write_page(UINT32 const lpn, UINT32 const sect_offset, UINT32 const 
 	// timer 설정
 	inc_timer(bank);
 
+	/*
     // defusion 검사
-	if (get_gc_victim_cost(bank) != 128) {
-		if ((new_cost = calc_avg_cost(bank)) > get_avg_cost(bank))
+	if ((get_gc_victim_cost(bank) != 128) && (get_gc_victim_cost(bank) > COST_EFF)) {
+		if ((new_cost = calc_avg_cost(bank)) > (get_avg_cost(bank)))
 		// while ((new_cost = calc_avg_cost(bank)) > get_avg_cost(bank))
 		{
 			defusion (bank);
 		}
 		set_avg_cost (bank, new_cost);
 	}
+	*/
 
 	// PMA hit rate 정리
-	calc_hit_rate (bank);
+	//calc_hit_rate (bank);
 }
 
 
@@ -816,7 +834,7 @@ static UINT32 assign_new_write_vpn(UINT32 const bank, UINT32 const lpn)
         }
 
         // 이전에 기록한 page를 invalid 표시
-        vcnt = set_vpm_invalid (bank, old_vpn);
+		vcnt = set_vpm_invalid (bank, old_vpn);
 
         // 현재 write하는 block이 아닌 경우 garbage collection cost 계산
         if ((old_vpn >> BLK_TO_PAGE) != (get_write_page(bank) >> BLK_TO_PAGE))
@@ -848,6 +866,10 @@ static UINT32 assign_new_write_vpn(UINT32 const bank, UINT32 const lpn)
     // lpn <-> vpn metadata 갱신
     set_lpm_vpn (bank, lpn, new_vpn);
     set_vpm_lpn (bank, new_vpn, lpn);
+	if (old_vpn != 0x00000000)
+	{
+		set_vpm_ow (bank, new_vpn);
+	}
     
     // 연속성 검사
 	if (((((lpn >> 3) + 1) & 127) == 0) && (((new_vpn+1) & 127) == 0))
@@ -946,6 +968,9 @@ static void format(void)
     {		
         set_timer(i32, 0);
         set_write_page(i32, 0);
+		set_low_prior_page(i32, 0);
+
+		set_gc_p(i32, 0);
 
 		set_total_hit (i32, 0);
 		set_page_hit (i32, 0);
@@ -954,6 +979,7 @@ static void format(void)
 
         set_gc_victim_cost(i32, 128);
         set_gc_victim_blk(i32, 0);
+		//set_recent_eraseblk(i32, 0);
 
         set_free_blk_cnt(i32, VBLKS_PER_BANK);
 		set_log_blk_cnt(i32, 0);
@@ -989,7 +1015,7 @@ static void init_metadata_sram(void)
     //----------------------------------------
     for (bank = 0; bank < NUM_BANKS; bank++)
     {
-        set_check_blk (bank, 0);
+        set_using_blk (bank, 0);
 
         //g_misc_meta[bank].free_blk_cnt = VBLKS_PER_BANK - META_BLKS_PER_BANK;
         //g_misc_meta[bank].free_blk_cnt -= get_bad_blk_cnt(bank);
@@ -1007,7 +1033,7 @@ static void init_metadata_sram(void)
             vblock++;
         }
         set_miscblk_vbn(bank, vblock);
-        set_check_blk (bank, vblock);
+        set_using_blk (bank, vblock);
         
         //----------------------------------------
         // assign logical page mapping block
@@ -1022,7 +1048,7 @@ static void init_metadata_sram(void)
                 set_lpmblk_vbn(bank, mapblk_lbn, vblock);
                 mapblk_lbn++;
             }
-            set_check_blk (bank, vblock);			
+            set_using_blk (bank, vblock);			
         }
 
         //----------------------------------------
@@ -1038,7 +1064,7 @@ static void init_metadata_sram(void)
                 set_lbmblk_vbn (bank, mapblk_lbn, vblock);
                 mapblk_lbn++;
             }
-            set_check_blk (bank, vblock);
+            set_using_blk (bank, vblock);
         }
         
         //----------------------------------------
@@ -1054,7 +1080,7 @@ static void init_metadata_sram(void)
                 set_vpmblk_vbn (bank, mapblk_lbn, vblock);
                 mapblk_lbn++;
             }
-            set_check_blk (bank, vblock);
+            set_using_blk (bank, vblock);
         }
 
         //----------------------------------------
@@ -1070,7 +1096,7 @@ static void init_metadata_sram(void)
                 set_vbmblk_vbn (bank, mapblk_lbn, vblock);
                 mapblk_lbn++;
             }
-            set_check_blk (bank, vblock);
+            set_using_blk (bank, vblock);
         }
 
         //----------------------------------------
@@ -1086,22 +1112,24 @@ static void init_metadata_sram(void)
                 set_emptyblk_vbn (bank, mapblk_lbn, vblock);
                 mapblk_lbn++;
             }
-            set_check_blk (bank, vblock);
+            set_using_blk (bank, vblock);
         }
 
         //----------------------------------------
         // assign free block for gc
         //----------------------------------------
-        do
+		mapblk_lbn = 0;
+		while (mapblk_lbn < 2)
         {
-            vblock++;
-            // NOTE: free block should not be secleted as a victim @ first GC
-            // set free block
-            set_gc_block(bank, vblock);
-            set_check_blk (bank, vblock);
-
-            ASSERT(vblock < VBLKS_PER_BANK);
-        }while(is_bad_block(bank, vblock) == TRUE);
+			vblock++;
+            ASSERT (vblock < VBLKS_PER_BANK);
+            if (is_bad_block (bank, vblock) == FALSE)
+            {
+                set_gc_block (bank, vblock, mapblk_lbn);
+                mapblk_lbn++;
+            }
+            set_using_blk (bank, vblock);            
+        }
 
         //----------------------------------------
         // assign free block for defusion
@@ -1112,10 +1140,22 @@ static void init_metadata_sram(void)
             // NOTE: free block should not be secleted as a victim @ first GC
             // set free block
             set_df_block(bank, vblock);
-            set_check_blk (bank, vblock);
+            set_using_blk (bank, vblock);
 
             ASSERT(vblock < VBLKS_PER_BANK);
         }while(is_bad_block(bank, vblock) == TRUE);
+
+
+		// pma에서 low priority를 가지는 page들이 들어올 block을 미리 예약한다
+		while (is_bad_block (bank, vblock) == TRUE)
+        {
+            set_using_blk (bank, vblock);
+            vblock++;
+        }
+        set_low_prior_page (bank, blk_to_page(vblock));
+        set_using_blk (bank, vblock);
+
+		set_recent_emptyblk (bank, vblock);
 
         // bad block을 사용하지 못하도록 표시
         do
@@ -1123,7 +1163,7 @@ static void init_metadata_sram(void)
             vblock++;
             if (is_bad_block (bank, vblock) == TRUE)
             {
-                set_check_blk (bank, vblock);
+                set_using_blk (bank, vblock);
             }
         }while (vblock < BLKS_PER_BANK);
 
@@ -1369,6 +1409,22 @@ static UINT32 get_new_page (UINT32 const bank)
 		{
 			vpn = garbage_collection(bank);
 		}
+
+		
+		// defusion 검사
+		if (get_gc_victim_cost(bank) != 128) {
+			UINT32 new_cost;
+
+			if ((new_cost = calc_avg_cost(bank)) > (get_avg_cost(bank)))
+			// while ((new_cost = calc_avg_cost(bank)) > get_avg_cost(bank))
+			{
+				defusion (bank);
+			}
+			set_avg_cost (bank, new_cost);
+		}	
+
+		// PMA hit rate 정리
+		calc_hit_rate (bank);
     }
 	    
     // block의 page를 다 쓴 경우 다음에 write할 page number를 null로 입력
@@ -1378,6 +1434,7 @@ static UINT32 get_new_page (UINT32 const bank)
 
         // 이번에 다 쓴 block의 valid count를 gc victim block의 valid count와 비교
         vbn = vpn >> BLK_TO_PAGE;
+		set_vbm_used(bank, vbn);
         cost = get_vbm_vcnt(bank, vbn);
         if (cost < get_gc_victim_cost(bank))
         {
@@ -1519,6 +1576,13 @@ static UINT32 set_vpm_invalid (UINT32 const bank, UINT32 const vpn)
     return dec_vbm_vcnt (bank, vpn / PAGES_PER_BLK);
 }
 
+static void set_vpm_ow (UINT32 const bank, UINT32 const vpn)
+{
+    // page mapping data에 overwrite로 표시
+    set_bit_dram (VPAGE_MAP_ADDR + get_page_offset (bank, VPAGES_PER_BANK, vpn) * VPAGE_MAP_SIZE + VPAGE_MAP_OP,
+        VPAGE_MAP_OP_OW_BIT);
+}
+
 static UINT32 get_vpm_lpn (UINT32 const bank, UINT32 const vpn)
 {
     return (read_dram_32 (VPAGE_MAP_ADDR + get_page_offset (bank, VPAGES_PER_BANK, vpn) * VPAGE_MAP_SIZE) & VPAGE_MAP_LPN_MASK);
@@ -1526,7 +1590,14 @@ static UINT32 get_vpm_lpn (UINT32 const bank, UINT32 const vpn)
 
 static BOOL32 get_vpm_valid (UINT32 const bank, UINT32 const vpn)
 {
-    return tst_bit_dram (VPAGE_MAP_ADDR + get_page_offset (bank, VPAGES_PER_BANK, vpn) * VPAGE_MAP_SIZE + VPAGE_MAP_OP, VPAGE_MAP_OP_V_BIT);
+    return tst_bit_dram (VPAGE_MAP_ADDR + get_page_offset (bank, VPAGES_PER_BANK, vpn) * VPAGE_MAP_SIZE + VPAGE_MAP_OP,
+		VPAGE_MAP_OP_V_BIT);
+}
+
+static BOOL32 get_vpm_ow (UINT32 const bank, UINT32 const vpn)
+{
+    return tst_bit_dram (VPAGE_MAP_ADDR + get_page_offset (bank, VPAGES_PER_BANK, vpn) * VPAGE_MAP_SIZE + VPAGE_MAP_OP,
+		VPAGE_MAP_OP_OW_BIT);
 }
 
 // virtual block metadata 관리
@@ -1658,24 +1729,6 @@ static void set_using_blk (UINT32 const bank, UINT32 const vbn)
     dec_free_blk_cnt(bank);
 
 	// using block으로 입력
-	set_vbm_used (bank, vbn);
-
-    //uart_printf ("set_using_blk :: bank %d vbn %d offset %d, bit_offset %d", bank, vbn, offset, bit_offset);
-}
-
-// using bit을 표시하지 않고 나중에 사용할 용도로 check 하는 block
-static void set_check_blk (UINT32 const bank, UINT32 const vbn)
-{
-    UINT32 offset, bit_offset;
-
-    offset = EMPTY_BLK_PER_BANK * bank + (vbn / 8);
-    bit_offset = 7-(vbn % 8);
-    clr_bit_dram (EMPTY_BLK_ADDR + offset, bit_offset);
-
-    // free block count 감소
-    dec_free_blk_cnt(bank);
-	
-	// using block을 제거
 	set_vbm_notused (bank, vbn);
 
     //uart_printf ("set_using_blk :: bank %d vbn %d offset %d, bit_offset %d", bank, vbn, offset, bit_offset);
@@ -1711,7 +1764,7 @@ static UINT32 get_empty_blk (UINT32 const bank)
 
 	// empty blk bitmap에서 한 byte씩 검사
 	offset = EMPTY_BLK_PER_BANK * bank;
-	for (vbn = 0; vbn < BLKS_PER_BANK; vbn++)
+	for (vbn = get_recent_emptyblk(bank); vbn < BLKS_PER_BANK; vbn++)
 	{
 		bytes = vbn / 8;
 
@@ -1719,7 +1772,21 @@ static UINT32 get_empty_blk (UINT32 const bank)
 		{
 			// empty block bit map에 using으로 표시
 			set_using_blk (bank, vbn);
+			set_recent_emptyblk(bank, vbn);
+			//uart_printf ("get_empty_blk :: bank %d vbn %d offset %d bit_offset %d", bank, vbn, offset+bytes, 7-(vbn & 0x7));
 
+			return vbn;
+		}
+	}
+	for (vbn = 0; vbn < get_recent_emptyblk(bank); vbn++)
+	{
+		bytes = vbn / 8;
+
+		if (tst_bit_dram(EMPTY_BLK_ADDR + offset + bytes, 7-(vbn & 0x7)))
+		{
+			// empty block bit map에 using으로 표시
+			set_using_blk (bank, vbn);
+			set_recent_emptyblk(bank, vbn);
 			//uart_printf ("get_empty_blk :: bank %d vbn %d offset %d bit_offset %d", bank, vbn, offset+bytes, 7-(vbn & 0x7));
 
 			return vbn;
@@ -1764,11 +1831,16 @@ static UINT32 get_empty_blk (UINT32 const bank)
 // janus ftl fuction
 static void fusion (UINT32 const bank, UINT32 const lbn)
 {
+	UINT32 vbn;
+
 #ifdef __TEST_FUSION
 	//uart_printf ("fusion :: bank %d, lbn %d", bank, lbn);
 #endif
+	
+	vbn = get_lpm_vpn (bank, (lbn << (BLK_TO_PAGE + 3)) + bank) >> BLK_TO_PAGE;
 	set_lbm_mapstat (bank, lbn, PAGE_MAPPING);
-	set_vbm_lblk (bank, get_lpm_vpn (bank, (lbn << (BLK_TO_PAGE + 3)) + bank) >> BLK_TO_PAGE);
+	set_vbm_lblk (bank, vbn);
+	set_vbm_used (bank, vbn);
 	inc_log_blk_cnt(bank);
 }
 
@@ -1845,7 +1917,7 @@ static void defusion (UINT32 const bank)
 
 		vbn = get_empty_blk (bank);
 		set_df_block (bank, vbn);
-		set_check_blk (bank, vbn);
+		set_vbm_notused(bank, vbn);
 	}
 	// empty block이 없을 경우
 	else
@@ -1862,7 +1934,7 @@ static void defusion (UINT32 const bank)
 		// empty block이 생기면 defusion용 block으로 설정
 		vbn = get_empty_blk (bank);
 		set_df_block (bank, vbn);
-		set_check_blk (bank, vbn);	
+		set_vbm_notused(bank,vbn);
 	}
 }
 
@@ -1870,23 +1942,23 @@ static UINT32 garbage_collection (UINT32 const bank)
 {
 	UINT32 cnt_vblk, cnt_nblk, i;
 	UINT32 vpn, npn, vbn, nbn, lpn, new_vpn;
+	UINT32 nbn_lp, npn_lp;
 
 #ifdef __TEST_GC
 	uart_printf ("garbage_collection :: bank %d", bank);
 #endif
 
-	vbn = get_gc_victim_blk (bank);
-	vpn = blk_to_page (vbn);
-
 	// defusion 과정에서 empty block을 만들기 위해 gc를 할수 있으므로 현재 write page가 있을 경우 그 block으로 gc를 한다
 	npn = get_write_page (bank);
 	if (npn == 0)
 	{
-		// block이 가득 차서 garbage collection을 할 경우 page가 가득 찼으므로 무조건 current write page는 0
-		// write 과정에서 block을 다 쓰면 current write page를 0으로 입력하도록 설정함
-		nbn = get_gc_block (bank);
-		set_vbm_used (bank, nbn);
+		// block이 가득 차서 garbage collection을 할 경우
+		// write 과정에서 block을 다 쓰면 current write page를 0으로 입력하도록 설정
+		nbn = get_gc_block (bank, get_gc_p(bank));
 		npn = 0;
+
+		set_gc_block(bank, 0, get_gc_p(bank));
+		inv_gc_p(bank);
 	}
 	else
 	{
@@ -1899,55 +1971,127 @@ static UINT32 garbage_collection (UINT32 const bank)
 		npn = npn & 127;
 	}
 	
+	// low priority gc block
+	nbn_lp = get_low_prior_page (bank);
+	if (nbn_lp != 0)
+	{
+		npn_lp = page_offset(nbn_lp);
+		nbn_lp = page_to_blk(nbn_lp);
+	}
+	else
+	{
+		nbn_lp = get_gc_block (bank, get_gc_p(bank));
+		npn_lp = 0;
+
+		set_gc_block(bank, 0, get_gc_p(bank));
+		inv_gc_p(bank);
+	}
+
 	// victim block에서 valid한 page를 copy
+	vbn = get_gc_victim_blk (bank);
+	vpn = blk_to_page (vbn);
+
 	for (i=0; i < PAGES_PER_BLK; i++)
 	{
 		// valid page인지 확인
 		if (get_vpm_valid (bank, vpn))
 		{
-			// valid page이면 copy한다
-			nand_page_copyback (bank, vbn, i, nbn, npn);
+			// overwrite된 page인지 확인
+			if (get_vpm_ow(bank, vpn) == 1)
+			{				
+				nand_page_copyback (bank, vbn, i, nbn, npn);
+				new_vpn = blk_to_page (nbn) + npn;
+				
+				// new block에서 다음에 쓸 page count를 증가시킨다
+				npn++;
+				if ((npn & 127) == 0)
+				{
+					set_vbm_used(bank, nbn);
+
+					// 쓰던 block을 다 썼을 경우 garbage collection 용도로 할당해 놓은 block을 사용한다
+					nbn = get_gc_block (bank, get_gc_p(bank));
+					npn = 0;
+
+					set_gc_block (bank, 0, get_gc_p(bank));
+					inv_gc_p(bank);
+				}			
+			}
+			else
+			{
+				nand_page_copyback (bank, vbn, i, nbn_lp, npn_lp);
+				new_vpn = blk_to_page (nbn_lp) + npn_lp;
+
+				// low-priority block에서 다음에 쓸 page count를 증가시킨다
+				npn_lp++;
+				if ((npn & 127) == 0)
+				{
+					set_vbm_used(bank, nbn_lp);
+
+					// 쓰던 block을 다 썼을 경우 garbage collection 용도로 할당해 놓은 block을 사용한다
+					nbn_lp = get_gc_block (bank, get_gc_p(bank));
+					npn_lp = 0;
+
+					set_gc_block (bank, 0, get_gc_p(bank));
+					inv_gc_p(bank);
+				}	
+			}
 
 			// copy된 page는 invalid로 설정
 			set_vpm_invalid (bank, vpn);
 
 			// logical page mapping table과 virtual page mapping table 갱신
-			lpn = get_vpm_lpn (bank, vpn);
-			new_vpn = blk_to_page (nbn) + npn;
+			lpn = get_vpm_lpn (bank, vpn);			
 			set_lpm_vpn (bank, lpn, new_vpn);
-			set_vpm_lpn (bank, new_vpn, lpn);
-
-			// new block에서 다음에 쓸 page count를 증가시킨다
-			npn++;
-			if ((npn & 127) == 0)
-			{
-				// 쓰던 block을 다 썼을 경우 garbage collection 용도로 할당해 놓은 block을 사용한다
-				nbn = get_gc_block (bank);
-				set_vbm_used (bank, nbn);
-				npn = 0;
-			}
+			set_vpm_lpn (bank, new_vpn, lpn);			
 		}
 
 		vpn++;
 	}
 
+	// current write page를 갱신한다
+	set_write_page (bank, (blk_to_page (nbn) + npn));
+	set_low_prior_page (bank, (blk_to_page (nbn_lp) + npn_lp));
+
 	nand_block_erase (bank, vbn);
-	// garbage collection용 block을 사용하지 않고 gc를 완료했을 경우 새로 생긴 block은 empty block으로 반환
-	if (get_gc_block (bank) != nbn)
+	set_vbm_notused(bank, vbn);
+
+	// gc block이 모두 있는 상태에서 gc를 완료했을 경우 새로 생긴 block은 empty block으로 반환
+	if ((get_gc_block (bank, 0) != 0) && (get_gc_block(bank, 1) != 0))
 	{
 		set_empty_blk (bank, vbn);
+		set_recent_emptyblk (bank, vbn);
 	}
-	// gc block을 사용해서 gc를 완료했을 경우 새로 생긴 block은 gc block으로 설정
+
+	// gc block을 사용해서 gc를 완료했을 경우
 	else
 	{
-		set_gc_block (bank, vbn);
+		// 2개 모두 사용했을 경우
+		if ((get_gc_block (bank, 0) == 0) && (get_gc_block(bank, 1) == 0))
+		{
+			// 현재 가리키는 gc block을 일단 채우고
+			set_gc_block (bank, vbn, get_gc_p(bank));
+
+			// 모든 gc block이 찰때까지 gc를 더 수행한다
+			do
+			{
+				garbage_collection (bank);
+			}
+			while ((get_gc_block (bank, 0) == 0) || (get_gc_block(bank, 1) == 0));
+		}
+
+		// 1개만 사용했을 경우
+		else if (get_gc_block (bank, 0) == 0)
+		{
+			set_gc_block (bank, vbn, 0);
+		}			
+		else
+		{
+			set_gc_block (bank, vbn, 1);
+		}
 	}
 
 	// 다음 victim block을 미리 선정
 	calc_gc_victim_blk (bank);
-
-	// current write page를 갱신한다
-	set_write_page (bank, (blk_to_page (nbn) + npn));
 
 	return (blk_to_page(nbn) + npn);
 }
@@ -2046,6 +2190,7 @@ static UINT32 calc_avg_cost (UINT32 const bank)
 	return cost_avg;
 }
 
+/*
 static void calc_hit_rate (UINT32 const bank)
 {
 	if (get_total_hit(bank) == HIT_MAX)
@@ -2054,732 +2199,17 @@ static void calc_hit_rate (UINT32 const bank)
 		set_page_hit (bank, (get_page_hit(bank) / 3) * 2);
 	}
 }
+*/
+static void calc_hit_rate (UINT32 const bank)
+{
+	if (get_total_hit(bank) == (PAGES_PER_BLK << 1))
+	{
+		set_total_hit (bank, 0);
+		set_page_hit (bank, 0);
+	}
+}
 
 //=================================================================
-
-
-
-
-/*
-// logical page가 들어간 data block의 virtual block number를 반환 - complete
-static UINT32 get_dblock (UINT32 const lpn)
-{
-    UINT32 blk, lbpn, bank;
-    
-    bank = get_num_bank (lpn);
-    lbpn = lpn / NUM_BANKS;
-    blk = lbpn / PAGES_PER_BLK;
-
-    // 해당 logical page의 data block 번호를 반환 ( 0x00000000 : Invalid)
-    return read_dram_32 (DATA_BLK_ADDR + ((blk * NUM_BANKS + bank) * DATA_BLK_SIZE) + DATA_BLK_VADDR);		
-}
-
-// logical page의 data block이 존재하는지 확인 - complete
-static BOOL8 is_exist_dblock (UINT32 const lpn)
-{
-    UINT32 lbpn, bank;
-    UINT32 blk;
-
-    //uart_printf ("is exist dblock : %d", lpn);
-
-    // DRAM에서 data block의 option 정보 read
-    bank = get_num_bank (lpn);
-    lbpn = lpn / NUM_BANKS;
-    blk = lbpn / PAGES_PER_BLK;
-
-    //uart_printf ("data block option :: %x", read_dram_8 (DATA_BLK_ADDR + (DATA_BLK_SIZE * (blk * NUM_BANKS + bank)) + DATA_BLK_OP));
-
-    // block valid bit이 활성화 되있는지 검사
-    //if (tst_bit_dram (DATA_BLK_ADDR + (DATA_BLK_SIZE * (blk * NUM_BANKS + bank)) + DATA_BLK_OP, DATA_BLK_OP_EX)) {
-    if (read_dram_32 (DATA_BLK_ADDR + (DATA_BLK_SIZE * (blk * NUM_BANKS + bank)) + DATA_BLK_VADDR) != 0) {
-        //uart_printf ("dblock is exist");
-        return TRUE;
-    }
-    return FALSE;
-}
-
-// logical page가 data block이나 log block에 기록된 적이 있는지 확인 - complete
-static BOOL8 is_exist_dpage (UINT32 const lpn)
-{
-    UINT32 blk, lbpn, bank, offset, bit_offset;
-
-    // DRAM에서 data block의 page mapping 정보 read
-    bank = get_num_bank (lpn);
-    lbpn = lpn / NUM_BANKS;
-    blk = lbpn / PAGES_PER_BLK;
-    offset = lbpn % PAGES_PER_BLK;
-    bit_offset = offset % 8;
-
-    // data block에서 valid 상태인지 검사
-    if (tst_bit_dram (DATA_BLK_ADDR + ((blk * NUM_BANKS + bank) * DATA_BLK_SIZE) + DATA_BLK_VPBMP + (offset / 8), bit_offset))
-    {
-        return TRUE;
-    }
-    else
-    {
-        // log block이 있는지 검사
-        blk = get_log_blk (lpn);
-        if (blk != 0xff) 
-        {
-            //log block에 page가 기록되어 있는지 검사
-            if (get_logblk_page (blk, lpn) == NULL)
-            {
-                return FALSE;
-            }
-            else
-            {
-                return TRUE;
-            }
-        } 
-        else
-        {
-            return FALSE;
-        }
-    }
-}
-
-// logical page가 data block에서 valid 상태인지 확인 - complete
-static BOOL8 is_valid_dblock (UINT32 const lpn)
-{
-    UINT32 blk, offset, bitoffset;
-    UINT32 bank, lbpn;
-
-    bank = get_num_bank (lpn);
-    lbpn = lpn / NUM_BANKS;
-    blk = lbpn / PAGES_PER_BLK;
-    offset = lbpn % PAGES_PER_BLK;
-    bitoffset = offset % 8;
-
-    // data block mapping data에서 해당 page의 page bitmap을 검사한다
-    if (tst_bit_dram (DATA_BLK_ADDR + ((blk * NUM_BANKS + bank) * DATA_BLK_SIZE) + DATA_BLK_VPBMP + (offset / 8),
-                    bitoffset))
-    {
-        return TRUE;
-    }
-    
-    return FALSE;
-}
-
-// block을 할당 받지 않은 data block에 새로 block을 할당 - complete
-static UINT32 assign_dblock (UINT32 const lpn)
-{
-    UINT32 vblk, blk, bank, lbpn, map_offset;
-    
-    //uart_printf("assign new data block : %d", lpn);
-    // data block용 새로운 block 할당
-    bank = get_num_bank (lpn);
-    lbpn = lpn / NUM_BANKS;
-    blk = lbpn / PAGES_PER_BLK;
-    vblk = get_empty_blk(bank);
-
-    //uart_printf("new data block number :%d", vblk);
-    // data block mapping data 입력
-    map_offset = blk * NUM_BANKS + bank;
-    write_dram_32 (DATA_BLK_ADDR + (map_offset * DATA_BLK_SIZE) + DATA_BLK_VADDR, vblk); // virtual block number 입력
-    //write_dram_8 (DATA_BLK_ADDR + (map_offset * DATA_BLK_SIZE) + DATA_BLK_OP, 0x80);	// option 입력
-    set_bit_dram (DATA_BLK_ADDR + (map_offset * DATA_BLK_SIZE) + DATA_BLK_OP, DATA_BLK_OP_EX);
-
-    return vblk;
-}
-
-// logical page에 해당하는 virtual page의 주소를 읽어온다
-static UINT32 get_dpage (UINT32 const lpn)
-{
-    UINT32 vbn;
-
-    vbn = get_dblock (lpn);
-
-    return ((vbn * PAGES_PER_BLK) + ((lpn / NUM_BANKS) % PAGES_PER_BLK));
-}
-
-// data block에서 logical page를 할당받는다 - complete
-static UINT32 set_dpage (UINT32 const lpn)
-{
-    UINT32 blk, offset, vblk, bit_offset;
-    UINT32 bank, lbpn;
-
-    //uart_printf ("set_datablock_page : %d", lpn);
-
-    // logical block number와 offset 계산
-    bank = get_num_bank (lpn);
-    lbpn = lpn / NUM_BANKS;
-    blk = lbpn / PAGES_PER_BLK;
-    offset = lbpn % PAGES_PER_BLK;
-    bit_offset = offset % 8;
-    
-    // virtual data block number를 읽어온다
-    vblk = read_dram_32 (DATA_BLK_ADDR + ((blk * NUM_BANKS + bank) * DATA_BLK_SIZE) + DATA_BLK_VADDR);
-
-    // data block의 valid page bitmap에 valid로 체크
-    set_bit_dram (DATA_BLK_ADDR + ((blk * NUM_BANKS + bank) * DATA_BLK_SIZE) + DATA_BLK_VPBMP + (offset / 8), bit_offset);
-
-    //uart_printf ("set_dpage :: vpn %d", (vblk*PAGES_PER_BLK) + offset);
-
-    // virtual page number 반환
-    return ((vblk * PAGES_PER_BLK) + offset);
-}
-
-// data block에서 logical page를 invalid 시킨다 - complete
-static BOOL8 set_invalid_dpage (UINT32 const lpn)
-{
-    UINT32 lbn, offset, bit_offset;
-    UINT32 bank, lbpn;
-
-    // block number와 offset 계산
-    bank = get_num_bank (lpn);
-    lbpn = lpn / NUM_BANKS;
-    lbn = lbpn / PAGES_PER_BLK;
-    offset = lbpn % PAGES_PER_BLK;
-    bit_offset = offset % 8;
-
-    // 현재 상태와 상관없이 valid bit를 clear
-    clr_bit_dram (DATA_BLK_ADDR + ((lbn * NUM_BANKS + bank) * DATA_BLK_SIZE) + DATA_BLK_VPBMP + (offset / 8), bit_offset);
-
-    return TRUE;
-}
-
-// log block에서 logical page를 dirty invalid로 체크한다 - complete
-static BOOL8 set_dirty_log_page (UINT32 const lpn)
-{
-    UINT32 lblk, i;
-    UINT32 bank, lbpn, offset, map_offset;
-    UINT8 d8;
-
-    // page의 block 내 offset 계산
-    bank = get_num_bank (lpn);
-    lbpn = lpn / NUM_BANKS;
-    offset = lbpn % PAGES_PER_BLK;
-
-    // log block 번호 검색
-    lblk = get_log_blk (lpn);
-
-    // log block의 page table에서 page가 존재하는지 검색
-    map_offset = bank * NUM_LOG_BLKS + lblk;
-    for (i=0; i < PAGES_PER_BLK; i++) 
-    {
-        // log block mapping table에서 page offset을 통해 logical page를 찾는다
-        d8 = read_dram_8 (LOG_BLK_ADDR + (map_offset * LOG_BLK_SIZE) + LOG_BLK_PGMAP + i);
-        
-        if (d8 == offset)
-        {			
-            // log block mapping table에서 dirty로 입력
-            write_dram_8 (LOG_BLK_ADDR + (map_offset * LOG_BLK_SIZE) + LOG_BLK_PGMAP + i, 0xFE);
-
-            // valid page counter 감소
-            d8 = read_dram_8 (LOG_BLK_ADDR + (map_offset * LOG_BLK_SIZE) + LOG_BLK_VLDPG);
-            write_dram_8 (LOG_BLK_ADDR + (map_offset * LOG_BLK_SIZE) + LOG_BLK_VLDPG, d8-1);
-            
-            return TRUE;
-        }
-    }
-
-    return FALSE;
-}
-
-// data block에 log block을 새로 연결한다 - complete
-static UINT32 set_log_blk (UINT32 const lpn)
-{
-    UINT32 vblk, lbn, bank;
-    UINT32 d, i, lbpn, offset;
-    UINT8 d8;
-
-    bank = get_num_bank (lpn);
-    lbpn = lpn / NUM_BANKS;
-    lbn = lbpn / PAGES_PER_BLK;
-
-    // log block 갯수가 가득 찼으면 garbage collection을 한다
-    //if (log_blk_cnt[bank] == NUM_LOG_BLKS) 
-    if (get_logblk_cnt(bank) == NUM_LOG_BLKS)
-    {
-        garbage_collection (bank, NUM_LOG_BLKS);
-    }
-    vblk = get_empty_blk (bank);
-
-    // log block mapping table에서 비어있는 자리 검색
-    for (i=0; i < NUM_LOG_BLKS; i++) 
-    {
-        d = read_dram_32 (LOG_BLK_ADDR + (bank * NUM_LOG_BLKS + i) * LOG_BLK_SIZE + LOG_BLK_VADDR);
-
-        // virtual block number가 0인 곳에 새 log block을 할당
-        if (d == 0)
-        {
-            break;
-        }
-    }
-
-    ASSERT (i != NUM_LOG_BLKS);
-
-    // data block mapping table에 log block 정보 기록
-    d8 = 0b11000000 + (UINT8)i;
-    write_dram_8 (DATA_BLK_ADDR + (lbn * NUM_BANKS + bank) * DATA_BLK_SIZE + DATA_BLK_OP, d8);
-
-#ifdef __TEST_LB
-    uart_printf ("set_log_blk :: bank %d vbn %d logblk %d", bank, vblk, i);
-#endif
-
-    // log block mapping table에 mapping data 기록
-    offset = bank * NUM_LOG_BLKS + i;
-    write_dram_32 (LOG_BLK_ADDR + offset * LOG_BLK_SIZE + LOG_BLK_VADDR, vblk); // virtual block number 기록
-    write_dram_32 (LOG_BLK_ADDR + offset * LOG_BLK_SIZE + LOG_BLK_LADDR, lbn); // logical block number 기록
-    write_dram_8 (LOG_BLK_ADDR + offset * LOG_BLK_SIZE + LOG_BLK_PGCNT, 0); // page counter 0로 초기화
-    write_dram_8 (LOG_BLK_ADDR + offset * LOG_BLK_SIZE + LOG_BLK_VLDPG, 0); // valid page counter 0으로 초기화
-    write_dram_8 (LOG_BLK_ADDR + offset * LOG_BLK_SIZE + LOG_BLK_MERGE, 0); // merge status를 partial merge로 초기화
-    for (d=0; d < PAGES_PER_BLK; d++)		// page number map을 invalid로 초기화
-    {
-        write_dram_8 (LOG_BLK_ADDR + offset * LOG_BLK_SIZE + LOG_BLK_PGMAP + d, 0xff);
-    }
-
-    // log block counter 증가
-    inc_logblk_cnt (bank);
-    //log_blk_cnt[bank]++;
-
-    return vblk;	// 새로 할당 된 log block의 virtual block number를 반환
-}
-
-// data block에 연결된 log block의 번호를 받아온다 - complete
-static UINT32 get_log_blk (UINT32 const lpn) 
-{
-    UINT32 lbn, bank, lbpn;
-    UINT8 d8;
-
-    bank = get_num_bank (lpn);
-    lbpn = lpn / NUM_BANKS;
-    lbn = lbpn / PAGES_PER_BLK;
-
-    if (tst_bit_dram (DATA_BLK_ADDR + (DATA_BLK_SIZE * (lbn * NUM_BANKS + bank)) + DATA_BLK_OP, DATA_BLK_OP_LB))
-    {
-        // log block이 있을 경우 log block의 번호 반환
-        d8 = read_dram_8 (DATA_BLK_ADDR + ((lbn * NUM_BANKS + bank) * DATA_BLK_SIZE) + DATA_BLK_OP);
-        d8 = d8 & DATA_BLK_OP_LBNUM;
-
-        return (UINT32)d8;
-    }
-    else
-    {
-        // log block이 없을 경우 0xff 반환
-        return 0xff;
-    }
-}
-
-// logical page 번호를 받아 log block에서 해당하는 page를 찾아서 반환한다 - complete
-static UINT32 get_log_page (UINT32 const lpn)
-{
-    UINT32 lblk;
-
-    lblk = get_log_blk (lpn);
-    if (lblk != 0xff)
-    {
-        return get_logblk_page (lblk, lpn);
-    }
-    else
-    {
-        //uart_printf("get_log_page :: ALERT return address is NULL");
-        return NULL;
-    }
-}
-
-// log block에 page를 할당한다 - complete
-static UINT32 set_log_page (UINT32 const lpn)
-{
-    UINT32 offset, lbpn, bank, page_offset;
-    UINT32 lblk, lpage, loffset, map_offset;
-    UINT8 d8;
-        
-    // log block에서 다음에 쓸 page 위치를 받는다
-    bank = get_num_bank(lpn);
-    lblk = get_log_blk (lpn);	// data block에 연결된 log block의 번호를 받는다
-    map_offset = bank * NUM_LOG_BLKS + lblk;
-    d8 = read_dram_8 (LOG_BLK_ADDR + (map_offset * LOG_BLK_SIZE) + LOG_BLK_PGCNT);
-    loffset = (UINT32)d8;	// log block에 다음에 page를 쓸 위치
-
-    // log block이 가득 찼으면 garbage collection을 한다
-    if (loffset == PAGES_PER_BLK)
-    {
-        garbage_collection (bank, lblk);
-        
-        // data block에 page가 있을 경우 새로 log block 할당
-        if (is_valid_dblock (lpn) == TRUE)
-        {
-            set_invalid_dpage (lpn);
-            set_log_blk (lpn);
-            return set_log_page(lpn);
-        }
-        else
-        {
-            return set_dpage(lpn);
-        }
-    }
-
-    //log block에서 page를 invalid 시킨다
-    set_dirty_log_page (lpn);
-
-    // log block에서 page의 주소를 계산
-    lpage = read_dram_32 (LOG_BLK_ADDR + (map_offset * LOG_BLK_SIZE) + LOG_BLK_VADDR);
-    lpage = lpage * PAGES_PER_BLK + loffset;
-
-    //uart_printf ("set_log_page :: bank %d lpn %d log page %d", bank, lpn, lpage);
-
-    // log block mapping table에 logical page를 연결
-    lbpn = lpn / NUM_BANKS;
-    offset = lbpn % PAGES_PER_BLK;
-    write_dram_8 (LOG_BLK_ADDR + (map_offset * LOG_BLK_SIZE) + LOG_BLK_PGMAP + loffset, (UINT8)offset);
-    
-    // log block에 page를 기록할 위치를 한칸 뒤로 이동한다
-    write_dram_8 (LOG_BLK_ADDR + (map_offset * LOG_BLK_SIZE) + LOG_BLK_PGCNT, (UINT8)(loffset + 1));
-
-    // valid page counter를 증가시킨다
-    d8 = read_dram_8 (LOG_BLK_ADDR + (map_offset * LOG_BLK_SIZE) + LOG_BLK_VLDPG);
-    write_dram_8 (LOG_BLK_ADDR + (map_offset * LOG_BLK_SIZE) + LOG_BLK_VLDPG, d8 + 1);
-
-    // 이번에 쓴 page가 순서에 맞지 않을 경우 merge 상태를 full merge로 입력
-    page_offset = (lpn / NUM_BANKS) % PAGES_PER_BLK;	// 이번에 쓰는 page의 block 내 offset 계산
-    if (page_offset != loffset)	// 이번에 쓴 위치와 비교
-    {
-        //full merge로 표시
-        write_dram_8 (LOG_BLK_ADDR + (map_offset * LOG_BLK_SIZE) + LOG_BLK_MERGE, 1);
-    }
-
-    return lpage;
-}
-
-// log block에 있는 logical page의 virtual address를 반환 - complete
-static UINT32 get_logblk_page (UINT32 const lblk, UINT32 const lpn)
-{
-    UINT32 i, offset, blk, bank, lbpn;
-    UINT8 d8, map_offset;
-    
-    // page의 block 내 offset 계산
-    bank = get_num_bank (lpn);
-    lbpn = lpn / NUM_BANKS;
-    offset = lbpn % PAGES_PER_BLK;
-
-    // log block의 page table에서 page가 존재하는지 검색
-    map_offset = bank * NUM_LOG_BLKS + lblk;
-    for (i=0; i < PAGES_PER_BLK; i++) 
-    {
-        // log block mapping table에서 page offset을 통해 logical page를 찾는다
-        d8 = read_dram_8 (LOG_BLK_ADDR + (map_offset * LOG_BLK_SIZE) + LOG_BLK_PGMAP + i);
-        
-        if (d8 == offset)
-        {
-            // log block의 virtual block number read
-            blk = read_dram_32 (LOG_BLK_ADDR + (map_offset * LOG_BLK_SIZE) + LOG_BLK_VADDR);
-
-            // page의 virtual page number 반환
-            return ((blk * PAGES_PER_BLK) + i);
-        }
-    }
-
-    // 존재하지 않을 경우 null 반환
-    return NULL;
-}
-
-// 같은 bank에서 empty block 한개를 반환한다 - complete
-static UINT32 get_empty_blk (UINT32 const bank)
-{
-    UINT32 offset;
-    UINT32 i, bytes, vbn;
-        
-    //uart_printf("get_empty_blk :: bank %d", bank);
-
-    // empty blk bitmap에서 한 byte씩 검사
-    offset = bank * BLKS_PER_BANK / 8;
-    for (bytes = 0; bytes < (BLKS_PER_BANK / 8); bytes++)
-    {
-        // bank에 해당하는 bit를 검사
-        for (i=0; i < 8; i++)
-        {
-            if (tst_bit_dram(EMPTY_BLK_ADDR + offset + bytes, 7-i))
-            {
-                // bit에 empty로 표시되었을 경우 vbn 반환
-                vbn = bytes * 8 + i;
-                // empty block bit map에 using으로 표시
-                set_using_blk (bank, vbn);
-
-                //uart_printf ("get_empty_blk :: vbn %d offset %d bit_offset %d", vbn, offset+bytes, 7-i);
-
-                return vbn;
-            }
-        }
-    }
-    
-    // 그래도 빈 block이 없으면 garbage collection 시도
-    return garbage_collection(bank, NUM_LOG_BLKS);
-}
-
-// 해당 bank의 virtual block을 using 상태로 체크 - incomplete
-static BOOL8 set_using_blk (UINT32 const bank, UINT32 const vbn)
-{
-    UINT32 offset, bit_offset;
-
-    offset = (bank * BLKS_PER_BANK / 8) + (vbn / 8);
-    bit_offset = 7-(vbn % 8);
-    clr_bit_dram (EMPTY_BLK_ADDR + offset, bit_offset);
-
-    //uart_printf ("set_using_blk :: bank %d vbn %d offset %d, bit_offset %d", bank, vbn, offset, bit_offset);
-
-    return TRUE;
-}
-
-static BOOL8 set_empty_blk (UINT32 const bank, UINT32 const vbn)
-{
-    UINT32 offset, bit_offset;
-
-    offset = (bank * BLKS_PER_BANK / 8) + (vbn / 8);
-    bit_offset = 7-(vbn % 8);
-    set_bit_dram (EMPTY_BLK_ADDR + offset, bit_offset);
-
-    return TRUE;
-}
-
-// garbage collection - complete
-static UINT32 garbage_collection (UINT32 const bank, UINT32 const logblk)
-{
-    UINT32 vblk, lbn, vbn, new_dbn, offset;
-    UINT32 i32, is_fmerge, j32;
-    UINT8 d8;
-
-    // garbage collection을 할 victim block 선정
-    if (logblk == NUM_LOG_BLKS) 
-    {
-        vblk = get_victim_block (bank);
-    } 
-    else
-    {
-        vblk = logblk;
-    }
-    lbn = read_dram_32 (LOG_BLK_ADDR + ((bank * NUM_LOG_BLKS + vblk) * LOG_BLK_SIZE) + LOG_BLK_LADDR);
-    vbn = read_dram_32 (DATA_BLK_ADDR + ((lbn * NUM_BANKS + bank) * DATA_BLK_SIZE) + DATA_BLK_VADDR);
-
-#ifdef __TEST_GC
-    uart_printf ("garbage_collection :: bank %d victim blk %d", bank, vblk);
-#endif
-
-    // log block에 page가 순서대로 위치하는지 검사
-    is_fmerge = 0;
-    for (i32 = 0; i32 < PAGES_PER_VBLK; i32++)
-    {
-        d8 = read_dram_8 (LOG_BLK_ADDR + ((bank * NUM_LOG_BLKS + vblk) * LOG_BLK_SIZE) + LOG_BLK_PGMAP + i32);
-
-        // log block에 기록된 적 없는 영역인 경우
-        if (d8 == 0xff)
-        {
-            // 순서대로 기록되어 있고 빈 공간이 있으므로 partial merge
-            break;
-        }
-        // log block에 page가 순서대로 들어있지 않은 상태
-        else if (d8 != (UINT8)i32)
-        {
-            //uart_printf("lpn %d, logpn %d", i32, d8);
-            is_fmerge = 1;
-            //break;
-        }
-    }
-
-    // partial merge
-    if (is_fmerge == 0)
-    {
-        new_dbn = partial_merge(bank, vblk, lbn);
-    }
-    // full merge
-    else
-    {
-        new_dbn = full_merge(bank, vblk, lbn);
-    }
-
-    // data block mapping table 갱신
-    write_dram_32 (DATA_BLK_ADDR + ((lbn * NUM_BANKS + bank) * DATA_BLK_SIZE) + DATA_BLK_VADDR, new_dbn);
-    write_dram_32 (DATA_BLK_ADDR + ((lbn * NUM_BANKS + bank) * DATA_BLK_SIZE) + DATA_BLK_OP, 0x80);
-
-    // 이전에 사용한 data block을 empty block mapping table에 표시
-    set_empty_blk (bank, vbn);
-
-    // log block mapping table 초기화
-    offset = bank * NUM_LOG_BLKS + vblk;
-    write_dram_32 (LOG_BLK_ADDR + (offset * LOG_BLK_SIZE) + LOG_BLK_VADDR, 0x00000000);
-    write_dram_32 (LOG_BLK_ADDR + (offset * LOG_BLK_SIZE) + LOG_BLK_LADDR, 0x00000000);
-    write_dram_8 (LOG_BLK_ADDR + (offset * LOG_BLK_SIZE) + LOG_BLK_PGCNT, 0x00);
-    for (j32 = 0; j32 < PAGES_PER_BLK; j32++) 
-    {
-        write_dram_8 (LOG_BLK_ADDR + (offset * LOG_BLK_SIZE) + LOG_BLK_PGMAP + j32, 0xff);
-    }
-
-    // log block counter 감소
-    dec_logblk_cnt  (bank);
-    //log_blk_cnt[bank]--;
-
-    // merge이전에 사용하던 data block이 empty 상태이므로 data block을 반환
-    return vbn;
-}
-
-// partial merge - complete
-static UINT32 partial_merge (UINT32 const bank, UINT32 const vblk, UINT32 const lbn)
-{
-    UINT32 vbn, offset, bit_offset, lvbn;
-    UINT32 dmap_offset, lmap_offset;
-    UINT32 i32;
-    UINT8 d8;
-
-#ifdef __TEST_GC
-    uart_printf ("partial_merge :: bank %d, vblk %d, lbn %d", bank, vblk, lbn);
-#endif
-
-    // garbage collection을 할 block의 virtual block number read
-    dmap_offset = lbn * NUM_BANKS + bank;
-    lmap_offset = bank * NUM_LOG_BLKS + vblk;
-    vbn = read_dram_32 (DATA_BLK_ADDR + (dmap_offset * DATA_BLK_SIZE) + DATA_BLK_VADDR);
-    lvbn = read_dram_32 (LOG_BLK_ADDR + (lmap_offset * LOG_BLK_SIZE) + LOG_BLK_VADDR);
-    
-    for (i32 = 0; i32 < PAGES_PER_VBLK; i32++)
-    {
-        // log block에 있는 page 번호 검사
-        d8 = read_dram_8 (LOG_BLK_ADDR + (lmap_offset * LOG_BLK_SIZE) + LOG_BLK_PGMAP + i32);
-
-        // log block에 정위치에 있는 경우 data block의 page bitmap에 표시
-        if (d8 == (UINT8)i32)
-        {
-            set_bit_dram (DATA_BLK_ADDR + (dmap_offset * DATA_BLK_SIZE) + DATA_BLK_VPBMP + (i32 / 8), (i32 % 8));
-        }
-        // log block에 없는 page인 경우 data block에서 이동
-        else if (d8 == 0xff)
-        {
-            // offset 계산
-            offset = i32 / 8;
-            bit_offset = i32 % 8;
-
-            // data block에 page가 있는지 확인
-            if (tst_bit_dram (DATA_BLK_ADDR + (dmap_offset * DATA_BLK_SIZE) + DATA_BLK_VPBMP + offset, bit_offset))
-            {
-                // data block에 있는 내용을 log block으로 copy back
-                nand_page_copyback (bank, vbn, i32, lvbn, i32);
-            }
-        }
-    }
-    // 정리가 끝난 data block은 erase
-    nand_block_erase (bank, vbn);
-
-#ifdef __TEST_GC
-    uart_printf ("partial_merge :: end", bank, vblk, lbn);
-#endif
-
-    return lvbn;
-}
-
-// full merge - complete
-static UINT32 full_merge (UINT32 const bank, UINT32 const vblk, UINT32 const lbn)
-{
-    UINT32 i32, j32, offset, bit_offset;
-    UINT32 nblk, vbn, lvbn, dmap_offset, lmap_offset;
-    UINT8 d8;
-
-    // 새로 만들 block 할당
-    nblk = get_gc_vblock (bank);
-
-    dmap_offset = lbn * NUM_BANKS + bank;
-    lmap_offset = bank * NUM_LOG_BLKS + vblk;
-
-#ifdef __TEST_GC
-    uart_printf ("full_merge :: bank %d, log blk %d, lbn %d, newblk %d", bank, vblk, lbn, nblk);
-#endif
-
-    // 0번 page부터 순서대로 이동
-    vbn = read_dram_32 (DATA_BLK_ADDR + (dmap_offset * DATA_BLK_SIZE) + DATA_BLK_VADDR);
-    lvbn = read_dram_32 (LOG_BLK_ADDR + (lmap_offset * LOG_BLK_SIZE) + LOG_BLK_VADDR);
-    for (i32 = 0; i32 < PAGES_PER_BLK; i32++)
-    {
-        //data block에 있는 경우 data block에서 복사
-        offset = i32 / 8;
-        bit_offset = i32 % 8;
-
-        // data block에 있는 page인 경우
-        if (tst_bit_dram (DATA_BLK_ADDR + (dmap_offset * DATA_BLK_SIZE) + DATA_BLK_VPBMP + offset, bit_offset))
-        {
-            // data block에 있는 내용을 새 block으로 copy back
-#ifdef __TEST_GC
-            uart_printf ("full_merge :: %d from data blk to new blk", i32);
-#endif
-            nand_page_copyback (bank, vbn, i32, nblk, i32);
-        }
-        // log block에 있는지 검사
-        else
-        {
-            // log block mapping table 전체 검사
-            for (j32 = 0; j32 < PAGES_PER_BLK; j32++)
-            {
-                d8 = read_dram_8 (LOG_BLK_ADDR + (lmap_offset * LOG_BLK_SIZE) + LOG_BLK_PGMAP + j32);
-
-                // log block에 찾는 번호가 있을 경우
-                if (d8 == i32)
-                {
-#ifdef __TEST_GC
-                    uart_printf ("full_merge :: page %3d is moved from log block %2d's %3d page to new block %2d", d8, lvbn, j32, nblk);
-#endif
-                    nand_page_copyback (bank, lvbn, j32, nblk, i32);
-                    // data block bitmap에 표시
-                    set_bit_dram (DATA_BLK_ADDR + (dmap_offset * DATA_BLK_SIZE) + DATA_BLK_VPBMP + offset, bit_offset);
-                    break;
-                }	
-            }
-        }
-    }
-
-    // 정리가 끝난 data block과 log block을 erase
-    nand_block_erase (bank, vbn);
-    nand_block_erase (bank, lvbn);
-    
-    // 이전에 사용한 log block은 다음 full merge에 사용할 new block으로 설정
-    set_gc_vblock (bank, lvbn);
-
-    // 새로 완성된 block의 주소 반환
-    return nblk;
-}
-
-// victim block을 선정한다 - sample
-static UINT32 get_victim_block (UINT32 const bank)
-{
-    UINT32 i32, map_offset, sel_blk, sel_max;
-    UINT8 d8;
-
-    map_offset = NUM_LOG_BLKS * bank;
-
-    // partial merge가 되는 block 중 valid page가 가장 많은 block 선택	
-    sel_blk = -1;
-    sel_max = 0;
-    for (i32 = 0; i32 < NUM_LOG_BLKS; i32++)
-    {
-        // partial merge가 가능한 block
-        if (read_dram_8 (LOG_BLK_ADDR + ((map_offset + i32)* LOG_BLK_SIZE) + LOG_BLK_MERGE) == 0)
-        {
-            // 현재 최댓값과 비교
-            d8 = read_dram_8 (LOG_BLK_ADDR + ((map_offset + i32) * LOG_BLK_SIZE) + LOG_BLK_VLDPG);
-            if (d8 >= sel_max)
-            {
-                sel_blk = i32;
-                sel_max = (UINT32)d8;
-            }
-        }
-    }
-    // partial merge가 가능한 block이 있으면 우선적으로 처리
-    if (sel_blk != -1)
-    {
-        return sel_blk;
-    }
-
-    // full merge가 되는 block 중에 valid page가 가장 적은 block을 선택
-    sel_max = PAGES_PER_BLK;
-    for (i32 = 0; i32 < NUM_LOG_BLKS; i32++)
-    {
-        d8 = read_dram_8 (LOG_BLK_ADDR + ((map_offset + i32) * LOG_BLK_SIZE) + LOG_BLK_VLDPG);
-        if (d8 < PAGES_PER_BLK)
-        {
-            sel_blk = i32;
-            sel_max = d8;
-        }
-    }
-    return sel_blk;
-}
-*/
-
 
 
 //sram 내용을 nand flash에 logging한다

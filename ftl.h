@@ -28,8 +28,8 @@
 //#define __TEST_WRT
 //#define __TEST_RD
 //#define __TEST_LB
-#define __TEST_LOGGING
-#define __TEST_PWRECV
+//#define __TEST_LOGGING
+//#define __TEST_PWRECV
 //#define __TEST_FUSION
 //#define __TEST_DEFUSION
 //#define __TEST_GC
@@ -47,8 +47,6 @@
 #define NUM_TEMP_BUFFERS	1
 
 //================================================================================
-#define NUM_LBLKS			(NUM_LPAGES / PAGES_PER_BLK)
-
 #define TIMESTAMP_MAX		0xffff
 #define HIT_MAX				65536
 #define AGE_OLD				0
@@ -56,10 +54,12 @@
 #define COST_COPY			4
 #define COST_PROG			3
 #define COST_ERASE			30
+#define COST_EFF			96
 
 #define LPAGES_PER_BANK		(NUM_LPAGES / NUM_BANKS)
 #define VPAGES_PER_BANK		(NUM_VPAGES / NUM_BANKS)
 
+#define NUM_LBLKS			(NUM_LPAGES / PAGES_PER_BLK)
 #define LBLKS_PER_BANK		(NUM_LBLKS / NUM_BANKS)
 
 #define PAGE_MAPPING		0
@@ -67,15 +67,17 @@
 
 #define BLK_TO_PAGE			7
 #define PAGE_MASK			0x0003ffff
+
+
 //================================================================================
 
-
+#if OPTION_FTL_TEST
 #define DRAM_BYTES_OTHER	((NUM_COPY_BUFFERS + NUM_FTL_BUFFERS + NUM_HIL_BUFFERS + NUM_TEMP_BUFFERS) * BYTES_PER_PAGE \
 + BAD_BLK_BMP_BYTES + LPAGE_MAP_BYTES + LBLK_META_BYTES + VPAGE_MAP_BYTES + VBLK_META_BYTES + EMPTY_BLK_BYTES + FTL_TEST_BYTES)
-/*
+#else
 #define DRAM_BYTES_OTHER	((NUM_COPY_BUFFERS + NUM_FTL_BUFFERS + NUM_HIL_BUFFERS + NUM_TEMP_BUFFERS) * BYTES_PER_PAGE \
 + BAD_BLK_BMP_BYTES + LPAGE_MAP_BYTES + LBLK_META_BYTES + VPAGE_MAP_BYTES + VBLK_META_BYTES + EMPTY_BLK_BYTES)
-*/
+#endif
 
 #define WR_BUF_PTR(BUF_ID)	(WR_BUF_ADDR + ((UINT32)(BUF_ID)) * BYTES_PER_PAGE)
 #define WR_BUF_ID(BUF_PTR)	((((UINT32)BUF_PTR) - WR_BUF_ADDR) / BYTES_PER_PAGE)
@@ -146,6 +148,7 @@
 // | .... .... | .... .... | .... .... | .... .... |
 // 0   option  8      13       page number         31
 // option				0 - valid bit (1 : valid)
+//						1 - overwrite bit (1 : has been overwritten page)
 // logical page number  13-31 : virtual page에 연결된 logical page
 //
 #define VPAGE_MAP_ADDR		(LBLK_META_ADDR + LBLK_META_BYTES)
@@ -154,7 +157,9 @@
 #define VPAGE_MAP_LPN_MASK	0x0003ffff
 #define VPAGE_MAP_OP		3
 #define VPAGE_MAP_OP_V_BIT	7
+#define VPAGE_MAP_OP_OW_BIT	6
 #define VPAGE_MAP_OP_V_MSK	0x80000000
+#define VPAGE_MAP_OP_OW_MSK 0x40000000
 
 
 
@@ -163,6 +168,7 @@
 // 0  option   8 valid cnt 16 erasecnt 23
 // option				0 : used bit (1 - used)
 //						1 : block status (0 - PMA, 1 - BMA)
+//						2 : priority (0 - high priority, 1 - low priority)
 // 
 // valid cnt			8-15  : virtual block에 있는 valid page의 갯수
 // erase cnt			16-23 : erase한 횟수
@@ -172,8 +178,10 @@
 #define VBLK_META_OP		3
 #define VBLK_META_OP_USED	7
 #define VBLK_META_OP_BLK	6
+#define VBLK_META_OP_PRIOR	5
 #define VBLK_META_OP_USED_MASK	0x80
 #define VBLK_META_OP_BLK_MASK	0x40
+#define VBLK_META_OP_PR_MASK	0x20
 #define VBLK_META_VCNT		2
 #define VBLK_META_ECNT		1	
 
@@ -187,10 +195,10 @@
 #define EMPTY_BLK_BYTES		(((NUM_BANKS * EMPTY_BLK_PER_BANK) / 128 + 1) * 128)
 #define EMPTY_BLK_BND		0
 
-
+#if OPTION_FTL_TEST
 #define FTL_TEST_ADDR		(EMPTY_BLK_ADDR + EMPTY_BLK_BYTES)
 #define FTL_TEST_BYTES		(4 * 1024 * 1024)
-
+#endif
 
 #define BLKS_PER_BANK		VBLKS_PER_BANK
 
