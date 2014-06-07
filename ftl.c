@@ -52,6 +52,9 @@ typedef struct _misc_metadata
 	UINT32 page_hit;
 	UINT32 total_hit;
 
+	UINT32 next_df_cnt;
+	UINT32 df_cnt;
+
 	UINT32 avg_cost;
 
     UINT32 cur_lpm_blk_vbn[LPMAP_PER_BANK]; // current write vpn for logging the age mapping info.
@@ -158,6 +161,12 @@ UINT32 				  g_ftl_write_buf_id;
 #define inc_page_hit(bank)				(g_misc_meta[bank].page_hit++)
 #define inc_total_hit(bank)				(g_misc_meta[bank].total_hit++)
 
+#define get_next_df_cnt(bank)			(g_misc_meta[bank].next_df_cnt)
+#define get_df_cnt(bank)				(g_misc_meta[bank].df_cnt)
+#define set_next_df_cnt(bank, cnt)		(g_misc_meta[bank].next_df_cnt = cnt)
+#define set_df_cnt(bank, cnt)			(g_misc_meta[bank].df_cnt = cnt)
+#define inc_df_cnt(bank)				(g_misc_meta[bank].df_cnt++)
+
 #define get_avg_cost(bank)				(g_misc_meta[bank].avg_cost)
 #define set_avg_cost(bank, cost)		(g_misc_meta[bank].avg_cost = cost)
 
@@ -224,10 +233,12 @@ static void set_vpm_lpn (UINT32 const bank, UINT32 const vpn, UINT32 const lpn);
 static UINT32 set_vpm_valid (UINT32 const bank, UINT32 const vpn);
 static UINT32 set_vpm_invalid (UINT32 const bank, UINT32 const vpn);
 static void set_vpm_ow (UINT32 const bank, UINT32 const vpn);
+static void set_vpm_lp (UINT32 const bank, UINT32 const vpn);
 
 static UINT32 get_vpm_lpn (UINT32 const bank, UINT32 const vpn);
 static BOOL32 get_vpm_valid (UINT32 const bank, UINT32 const vpn);
 static BOOL32 get_vpm_ow (UINT32 const bank, UINT32 const vpn);
+static BOOL32 get_vpm_lp (UINT32 const bank, UINT32 const vpn);
 
 // virtual block metadata 관리
 static void set_vbm_option (UINT32 const bank, UINT32 const vbn, UINT32 const used, UINT32 const blk_stat);
@@ -263,6 +274,7 @@ static UINT32 get_df_victim_blk (UINT32 const bank);
 
 static UINT32 calc_gc_victim_blk (UINT32 const bank);
 static UINT32 calc_avg_cost (UINT32 const bank);
+static UINT32 calc_df_cost (UINT32 const bank);
 static void calc_hit_rate (UINT32 const bank);
 
 
@@ -794,8 +806,44 @@ static void write_page(UINT32 const lpn, UINT32 const sect_offset, UINT32 const 
 	// timer 설정
 	inc_timer(bank);
 
-	/*
+	
     // defusion 검사
+	if (get_df_cnt(bank) == get_next_df_cnt(bank))
+	{
+		UINT32 cost_diff, old_cost, nxt_dfcnt, cost_df, loss_cost;
+
+		do
+		{
+			loss_cost = 0;
+			old_cost = get_avg_cost(bank);
+			new_cost = calc_avg_cost(bank);
+			cost_df = calc_df_cost(bank);
+
+			nxt_dfcnt = (PAGES_PER_BLK - get_gc_victim_cost(bank)) * get_log_blk_cnt(bank);
+
+			if (new_cost > old_cost)
+			{
+				cost_diff = new_cost - old_cost;
+				loss_cost = cost_diff * nxt_dfcnt;				
+			
+				if (loss_cost > cost_df)
+				{
+					defusion(bank);
+				}
+			}
+		}
+		while (loss_cost > cost_df);
+		
+		set_next_df_cnt(bank, nxt_dfcnt);
+		set_df_cnt(bank, 0);
+		set_avg_cost (bank, new_cost);
+	}
+	else
+	{
+		inc_df_cnt(bank);
+	}
+
+	/*
 	if ((get_gc_victim_cost(bank) != 128) && (get_gc_victim_cost(bank) > COST_EFF)) {
 		if ((new_cost = calc_avg_cost(bank)) > (get_avg_cost(bank)))
 		// while ((new_cost = calc_avg_cost(bank)) > get_avg_cost(bank))
@@ -805,6 +853,7 @@ static void write_page(UINT32 const lpn, UINT32 const sect_offset, UINT32 const 
 		set_avg_cost (bank, new_cost);
 	}
 	*/
+	
 
 	// PMA hit rate 정리
 	//calc_hit_rate (bank);
@@ -974,6 +1023,9 @@ static void format(void)
 
 		set_total_hit (i32, 0);
 		set_page_hit (i32, 0);
+
+		set_next_df_cnt(i32, 0);
+		set_df_cnt(i32, 0);
 
 		set_avg_cost (i32, 0xffffffff);
 
@@ -1410,7 +1462,7 @@ static UINT32 get_new_page (UINT32 const bank)
 			vpn = garbage_collection(bank);
 		}
 
-		
+		/*
 		// defusion 검사
 		if (get_gc_victim_cost(bank) != 128) {
 			UINT32 new_cost;
@@ -1421,7 +1473,8 @@ static UINT32 get_new_page (UINT32 const bank)
 				defusion (bank);
 			}
 			set_avg_cost (bank, new_cost);
-		}	
+		}
+		*/
 
 		// PMA hit rate 정리
 		calc_hit_rate (bank);
@@ -1583,6 +1636,13 @@ static void set_vpm_ow (UINT32 const bank, UINT32 const vpn)
         VPAGE_MAP_OP_OW_BIT);
 }
 
+static void set_vpm_lp (UINT32 const bank, UINT32 const vpn)
+{
+    // page mapping data에 low priority로 표시
+    set_bit_dram (VPAGE_MAP_ADDR + get_page_offset (bank, VPAGES_PER_BANK, vpn) * VPAGE_MAP_SIZE + VPAGE_MAP_OP,
+        VPAGE_MAP_OP_LP_BIT);
+}
+
 static UINT32 get_vpm_lpn (UINT32 const bank, UINT32 const vpn)
 {
     return (read_dram_32 (VPAGE_MAP_ADDR + get_page_offset (bank, VPAGES_PER_BANK, vpn) * VPAGE_MAP_SIZE) & VPAGE_MAP_LPN_MASK);
@@ -1598,6 +1658,12 @@ static BOOL32 get_vpm_ow (UINT32 const bank, UINT32 const vpn)
 {
     return tst_bit_dram (VPAGE_MAP_ADDR + get_page_offset (bank, VPAGES_PER_BANK, vpn) * VPAGE_MAP_SIZE + VPAGE_MAP_OP,
 		VPAGE_MAP_OP_OW_BIT);
+}
+
+static BOOL32 get_vpm_lp (UINT32 const bank, UINT32 const vpn)
+{
+    return tst_bit_dram (VPAGE_MAP_ADDR + get_page_offset (bank, VPAGES_PER_BANK, vpn) * VPAGE_MAP_SIZE + VPAGE_MAP_OP,
+		VPAGE_MAP_OP_LP_BIT);
 }
 
 // virtual block metadata 관리
@@ -1852,12 +1918,20 @@ static void defusion (UINT32 const bank)
 	//uart_printf ("defusion :: under construction :(");
 #endif
 	
+	// 빈 block이 있을 경우 defusion을 하지 않는다
+	if (get_free_blk_cnt (bank) > 0)
+	{
+		return;
+	}
+
+	/*
 	// log block이 남아있는지 검사
 	if (get_log_blk_cnt(bank) < get_log_blk_min(bank))
 	{
 		// log block을 더 사용할 수 있으면 defusion을 하지 않는다
 		return;
 	}
+	*/
 
 	// defusion victim block 선정
 	vblk = get_df_victim_blk (bank);
@@ -1940,7 +2014,7 @@ static void defusion (UINT32 const bank)
 
 static UINT32 garbage_collection (UINT32 const bank)
 {
-	UINT32 cnt_vblk, cnt_nblk, i;
+	UINT32 cnt_vblk, cnt_nblk, i, is_lp;
 	UINT32 vpn, npn, vbn, nbn, lpn, new_vpn;
 	UINT32 nbn_lp, npn_lp;
 
@@ -2014,26 +2088,55 @@ static UINT32 garbage_collection (UINT32 const bank)
 
 					set_gc_block (bank, 0, get_gc_p(bank));
 					inv_gc_p(bank);
-				}			
+				}	
+
+				is_lp = 0;
 			}
+			// overwrite가 발생하지 않은 page
 			else
 			{
-				nand_page_copyback (bank, vbn, i, nbn_lp, npn_lp);
-				new_vpn = blk_to_page (nbn_lp) + npn_lp;
-
-				// low-priority block에서 다음에 쓸 page count를 증가시킨다
-				npn_lp++;
-				if ((npn & 127) == 0)
+				// low priority bit가 check되지 않은 page
+				if (get_vpm_lp (bank, vpn) == 0)
 				{
-					set_vbm_used(bank, nbn_lp);
+					nand_page_copyback (bank, vbn, i, nbn, npn);
+					new_vpn = blk_to_page (nbn) + npn;
+				
+					// new block에서 다음에 쓸 page count를 증가시킨다
+					npn++;
+					if ((npn & 127) == 0)
+					{
+						set_vbm_used(bank, nbn);
 
-					// 쓰던 block을 다 썼을 경우 garbage collection 용도로 할당해 놓은 block을 사용한다
-					nbn_lp = get_gc_block (bank, get_gc_p(bank));
-					npn_lp = 0;
+						// 쓰던 block을 다 썼을 경우 garbage collection 용도로 할당해 놓은 block을 사용한다
+						nbn = get_gc_block (bank, get_gc_p(bank));
+						npn = 0;
 
-					set_gc_block (bank, 0, get_gc_p(bank));
-					inv_gc_p(bank);
-				}	
+						set_gc_block (bank, 0, get_gc_p(bank));
+						inv_gc_p(bank);
+					}
+				}
+				// low priority bit가 check된 page
+				else
+				{
+					nand_page_copyback (bank, vbn, i, nbn_lp, npn_lp);
+					new_vpn = blk_to_page (nbn_lp) + npn_lp;
+
+					// low-priority block에서 다음에 쓸 page count를 증가시킨다
+					npn_lp++;
+					if ((npn & 127) == 0)
+					{
+						set_vbm_used(bank, nbn_lp);
+
+						// 쓰던 block을 다 썼을 경우 garbage collection 용도로 할당해 놓은 block을 사용한다
+						nbn_lp = get_gc_block (bank, get_gc_p(bank));
+						npn_lp = 0;
+
+						set_gc_block (bank, 0, get_gc_p(bank));
+						inv_gc_p(bank);
+					}	
+				}
+
+				is_lp = 1;
 			}
 
 			// copy된 page는 invalid로 설정
@@ -2042,7 +2145,12 @@ static UINT32 garbage_collection (UINT32 const bank)
 			// logical page mapping table과 virtual page mapping table 갱신
 			lpn = get_vpm_lpn (bank, vpn);			
 			set_lpm_vpn (bank, lpn, new_vpn);
-			set_vpm_lpn (bank, new_vpn, lpn);			
+			set_vpm_lpn (bank, new_vpn, lpn);
+
+			if (is_lp == 1)
+			{
+				set_vpm_lp (bank, new_vpn);
+			}
 		}
 
 		vpn++;
@@ -2187,7 +2295,21 @@ static UINT32 calc_avg_cost (UINT32 const bank)
 			/ PAGES_PER_BLK;
 	cost_avg = cost_pw + (cost_df * (get_total_hit(bank) - get_page_hit(bank))) / get_total_hit(bank);
 
-	return cost_avg;
+	return cost_pw;
+	//return cost_avg;
+}
+
+static UINT32 calc_df_cost (UINT32 const bank)
+{
+	UINT32 cost_gc, cost_pw, cost_df, cost_avg;
+
+	// page write에 소모되는 평균 cost를 계산
+	cost_gc = COST_ERASE + (PAGES_PER_BLK * COST_COPY * get_gc_victim_cost(bank)) / PAGES_PER_BLK;
+	cost_pw = cost_gc / (PAGES_PER_BLK - get_gc_victim_cost(bank)) + COST_PROG;
+	cost_df = PAGES_PER_BLK * COST_COPY + COST_ERASE + (PAGES_PER_BLK * cost_pw * get_gc_victim_cost(bank)) 
+			/ PAGES_PER_BLK;
+
+	return cost_df;
 }
 
 /*

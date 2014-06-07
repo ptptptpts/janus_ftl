@@ -51,9 +51,9 @@
 #define HIT_MAX				65536
 #define AGE_OLD				0
 
-#define COST_COPY			4
-#define COST_PROG			3
-#define COST_ERASE			30
+#define COST_COPY			13
+#define COST_PROG			13
+#define COST_ERASE			15
 #define COST_EFF			96
 
 #define LPAGES_PER_BANK		(NUM_LPAGES / NUM_BANKS)
@@ -149,6 +149,8 @@
 // 0   option  8      13       page number         31
 // option				0 - valid bit (1 : valid)
 //						1 - overwrite bit (1 : has been overwritten page)
+//						2 - low priority bit (1 : if page which bit is set isn't overwritten before next gc,
+//												move to low priority PMA)
 // logical page number  13-31 : virtual page에 연결된 logical page
 //
 #define VPAGE_MAP_ADDR		(LBLK_META_ADDR + LBLK_META_BYTES)
@@ -158,8 +160,10 @@
 #define VPAGE_MAP_OP		3
 #define VPAGE_MAP_OP_V_BIT	7
 #define VPAGE_MAP_OP_OW_BIT	6
+#define VPAGE_MAP_OP_LP_BIT	5
 #define VPAGE_MAP_OP_V_MSK	0x80000000
 #define VPAGE_MAP_OP_OW_MSK 0x40000000
+#define VPAGE_MAP_OP_LP_MSK	0x20000000
 
 
 
